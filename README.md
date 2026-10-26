@@ -1,8 +1,3 @@
-BYOK (Bring Your Own Key) is the ideal architecture for this tool.
-Here is why it’s the best fit for both you and your users:
-Why BYOK Is Great:
-Zero Server Costs for You:
-You don't need to host, monitor, or pay for a cloud server or proxy.
 The tool runs autonomously on each user's device directly.
 Free for the User:
 Google AI Studio offers a free tier for Gemini models (gemini-3.8-flash / gemini-2.5-flash), so regular users incur no monthly costs for voice queries.
