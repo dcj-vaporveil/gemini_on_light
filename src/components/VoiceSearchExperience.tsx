@@ -18,8 +18,10 @@ import {
   MoreVertical,
   Send,
   Package,
+  FileCode,
 } from 'lucide-react';
 import { VoiceSearchItem, SearchSource, DisplayTheme } from '../types';
+import { LIGHT_SDK_FILES } from '../data/lightPhoneCodeSnippets';
 
 interface VoiceSearchExperienceProps {
   theme: DisplayTheme;
@@ -52,6 +54,8 @@ export const VoiceSearchExperience: React.FC<VoiceSearchExperienceProps> = ({
   const [showManualInput, setShowManualInput] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [showPackagingGuide, setShowPackagingGuide] = useState(false);
+  const [selectedFileIdx, setSelectedFileIdx] = useState(0);
+  const [fileCopied, setFileCopied] = useState(false);
 
   // Press and hold (long-press) state for message options
   const [isHolding, setIsHolding] = useState(false);
@@ -1024,6 +1028,56 @@ export const VoiceSearchExperience: React.FC<VoiceSearchExperienceProps> = ({
                 <p className="text-neutral-400 ml-7">
                   Once approved by the Light team, the tool is added to the official LightOS allow-list. Users can then find and install your tool with a single tap in the Light Phone Tool Library!
                 </p>
+              </div>
+
+              {/* Native Android Project Files Inspector */}
+              <div className="pt-4 border-t border-current/20">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <FileCode className="w-4 h-4 text-amber-400" />
+                    <span className="font-semibold text-white">Generated Native Android Kotlin Files</span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const file = LIGHT_SDK_FILES[selectedFileIdx];
+                      navigator.clipboard.writeText(file.content);
+                      setFileCopied(true);
+                      setTimeout(() => setFileCopied(false), 2000);
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#222] hover:bg-[#333] text-white border border-[#333] text-[11px] font-mono transition"
+                  >
+                    {fileCopied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{fileCopied ? 'Copied' : 'Copy File'}</span>
+                  </button>
+                </div>
+
+                {/* File Tabs */}
+                <div className="flex overflow-x-auto gap-1 pb-2 scrollbar-none">
+                  {LIGHT_SDK_FILES.map((f, i) => (
+                    <button
+                      key={f.name}
+                      onClick={() => setSelectedFileIdx(i)}
+                      className={`px-2.5 py-1 text-[11px] font-mono rounded whitespace-nowrap transition ${
+                        i === selectedFileIdx
+                          ? 'bg-[#2a2a2a] text-white border border-neutral-600'
+                          : 'text-neutral-400 hover:text-neutral-200 hover:bg-[#1a1a1a]'
+                      }`}
+                    >
+                      {f.name}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Active File Path & Description */}
+                <div className="text-[10px] text-neutral-400 font-mono mb-2 flex items-center justify-between">
+                  <span>{LIGHT_SDK_FILES[selectedFileIdx].path}</span>
+                  <span className="text-neutral-300">{LIGHT_SDK_FILES[selectedFileIdx].description}</span>
+                </div>
+
+                {/* Code Window */}
+                <pre className="max-h-60 overflow-auto p-3 rounded-xl bg-[#090909] border border-[#222] font-mono text-[11px] text-neutral-300 leading-relaxed scrollbar-thin">
+                  {LIGHT_SDK_FILES[selectedFileIdx].content}
+                </pre>
               </div>
             </div>
 

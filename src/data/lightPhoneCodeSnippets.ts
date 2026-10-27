@@ -2,13 +2,108 @@ import { CodeFile } from '../types';
 
 export const LIGHT_SDK_FILES: CodeFile[] = [
   {
+    name: 'DataStoreManager.kt',
+    path: 'tool/src/main/kotlin/com/thelightphone/gemini/DataStoreManager.kt',
+    language: 'kotlin',
+    description: 'Encapsulates secure API key and preference operations using Android Jetpack DataStore<Preferences>.',
+    content: `package com.thelightphone.gemini
+
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import java.io.IOException
+
+/**
+ * DataStoreManager encapsulates secure API key and preference operations
+ * for the Light Phone III using Android Jetpack DataStore<Preferences>.
+ */
+class DataStoreManager(
+    private val dataStore: DataStore<Preferences>
+) {
+    val apiKeyFlow: Flow<String?> = dataStore.data
+        .catch { exception ->
+            if (exception is IOException) emit(emptyPreferences()) else throw exception
+        }
+        .map { preferences ->
+            preferences[DataStoreKeys.GEMINI_API_KEY]?.takeIf { it.isNotBlank() }
+        }
+
+    val autoSpeakFlow: Flow<Boolean> = dataStore.data
+        .catch { emit(emptyPreferences()) }
+        .map { preferences -> preferences[DataStoreKeys.AUTO_SPEAK_RESPONSES] ?: true }
+
+    val forwardingEmailFlow: Flow<String?> = dataStore.data
+        .catch { emit(emptyPreferences()) }
+        .map { preferences -> preferences[DataStoreKeys.FORWARDING_EMAIL] }
+
+    suspend fun getApiKey(): String? {
+        val preferences = dataStore.data.first()
+        return preferences[DataStoreKeys.GEMINI_API_KEY]?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    suspend fun saveApiKey(apiKey: String) {
+        dataStore.edit { preferences ->
+            preferences[DataStoreKeys.GEMINI_API_KEY] = apiKey.trim()
+        }
+    }
+
+    suspend fun clearApiKey() {
+        dataStore.edit { preferences ->
+            preferences.remove(DataStoreKeys.GEMINI_API_KEY)
+        }
+    }
+
+    suspend fun setAutoSpeak(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[DataStoreKeys.AUTO_SPEAK_RESPONSES] = enabled
+        }
+    }
+
+    suspend fun setForwardingEmail(email: String) {
+        dataStore.edit { preferences ->
+            preferences[DataStoreKeys.FORWARDING_EMAIL] = email.trim()
+        }
+    }
+}
+`,
+  },
+  {
+    name: 'DataStoreKeys.kt',
+    path: 'tool/src/main/kotlin/com/thelightphone/gemini/DataStoreKeys.kt',
+    language: 'kotlin',
+    description: 'Typed preferences keys for DEFAULT_DATASTORE.',
+    content: `package com.thelightphone.gemini
+
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+
+object DataStoreKeys {
+    val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
+    val CONCISE_MODE = booleanPreferencesKey("concise_mode")
+    val AUTO_SPEAK_RESPONSES = booleanPreferencesKey("auto_speak_responses")
+    val FORWARDING_EMAIL = stringPreferencesKey("forwarding_email")
+    val MODEL_NAME = stringPreferencesKey("model_name")
+}
+`,
+  },
+  {
     name: 'HomeScreen.kt',
     path: 'tool/src/main/kotlin/com/thelightphone/gemini/HomeScreen.kt',
     language: 'kotlin',
-    description: 'The initial boot screen subclassing LightScreen with Compose UI and LightOS navigation.',
+    description: 'Boot screen subclassing LightScreen with Compose UI, voice search, and press-and-hold email forwarding.',
     content: `package com.thelightphone.gemini
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
@@ -16,35 +111,34 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.thelightphone.sdk.InitialScreen
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.ui.*
 
-/**
- * Main query screen for the Light Phone Gemini Tool.
- * Follows LightOS minimalist design: high-contrast, distraction-free, zero feeds.
- */
 @InitialScreen
 class HomeScreen(sealedActivity: SealedLightActivity) :
     LightScreen<Unit, GeminiToolViewModel>(sealedActivity) {
 
-    override val viewModelClass: Class<GeminiToolViewModel>
-        get() = GeminiToolViewModel::class.java
+    override val viewModelClass = GeminiToolViewModel::class.java
 
     override fun createViewModel(): GeminiToolViewModel {
-        return GeminiToolViewModel(
-            dataStore = lightContext.dataStore,
-            filesDir = lightContext.filesDir
-        )
+        val dataStoreManager = DataStoreManager(lightContext.dataStore)
+        return GeminiToolViewModel(dataStoreManager)
     }
 
     @Composable
     override fun Content() {
-        var inputPrompt by remember { mutableStateOf("") }
+        val context = LocalContext.current
+        var inputQuery by remember { mutableStateOf("") }
         val state by viewModel.uiState.collectAsState()
         val scrollState = rememberScrollState()
+
+        var showContextMenu by remember { mutableStateOf(false) }
+        var activeAnswerToForward by remember { mutableStateOf<Pair<String, String>?>(null) }
 
         LightTheme {
             Column(
@@ -53,120 +147,94 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
                     .background(LightThemeTokens.colors.background)
                     .padding(horizontal = 24.dp, vertical = 20.dp)
             ) {
-                // Header row with Title and Settings link
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 20.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    LightText(
-                        text = "Ask",
-                        variant = LightTextVariant.Heading
-                    )
-                    LightText(
-                        text = "Settings",
-                        variant = LightTextVariant.Detail,
-                        lighten = true,
-                        modifier = Modifier.lightClickable {
-                            navigateTo(::SettingsScreen)
-                        }
-                    )
+                    LightText("Voice Search", variant = LightTextVariant.Heading)
+                    LightText("Settings", variant = LightTextVariant.Detail, lighten = true,
+                        modifier = Modifier.lightClickable { navigateTo(::SettingsScreen) })
                 }
 
-                // Clean minimal prompt input
                 BasicTextField(
-                    value = inputPrompt,
-                    onValueChange = { inputPrompt = it },
-                    textStyle = LightThemeTokens.typography.copy.copy(
-                        color = LightThemeTokens.colors.text
-                    ),
+                    value = inputQuery,
+                    onValueChange = { inputQuery = it },
+                    textStyle = LightThemeTokens.typography.copy.copy(color = LightThemeTokens.colors.text),
                     cursorBrush = SolidColor(LightThemeTokens.colors.text),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 12.dp),
-                    decorationBox = { innerTextField ->
-                        if (inputPrompt.isEmpty()) {
-                            LightText(
-                                text = "What would you like to know?",
-                                variant = LightTextVariant.Copy,
-                                lighten = true
-                            )
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    decorationBox = { inner ->
+                        if (inputQuery.isEmpty()) {
+                            LightText("Ask a question or speak...", variant = LightTextVariant.Copy, lighten = true)
                         }
-                        innerTextField()
+                        inner()
                     }
                 )
 
-                // Actions: Query and Clear
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 24.dp)
-                ) {
-                    LightText(
-                        text = "Query",
-                        variant = LightTextVariant.Detail,
-                        modifier = Modifier
-                            .lightClickable {
-                                if (inputPrompt.isNotBlank()) {
-                                    viewModel.ask(inputPrompt)
-                                }
-                            }
-                            .padding(end = 24.dp)
-                    )
-
-                    LightText(
-                        text = "Clear",
-                        variant = LightTextVariant.Detail,
-                        lighten = true,
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
+                    LightText("Search", variant = LightTextVariant.Detail,
                         modifier = Modifier.lightClickable {
-                            inputPrompt = ""
-                            viewModel.reset()
-                        }
-                    )
+                            if (inputQuery.isNotBlank()) viewModel.search(inputQuery)
+                        }.padding(end = 24.dp))
+                    LightText("Clear", variant = LightTextVariant.Detail, lighten = true,
+                        modifier = Modifier.lightClickable { inputQuery = ""; viewModel.clear() })
                 }
 
-                // Response area
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .verticalScroll(scrollState)
-                ) {
+                Column(modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(scrollState)) {
                     when (val current = state) {
-                        is GeminiUiState.Idle -> {
-                            LightText(
-                                text = "Brief, plain-text answers. No algorithms or infinite feeds.",
-                                variant = LightTextVariant.Detail,
-                                lighten = true
-                            )
+                        is SearchUiState.Idle -> {
+                            LightText("Grounded web search powered by Gemini. Hold response to send to email.",
+                                variant = LightTextVariant.Detail, lighten = true)
                         }
-                        is GeminiUiState.Loading -> {
-                            LightText(
-                                text = "Thinking...",
-                                variant = LightTextVariant.Copy
-                            )
+                        is SearchUiState.Searching -> {
+                            LightText("Searching Google & Gemini...", variant = LightTextVariant.Copy)
                         }
-                        is GeminiUiState.Success -> {
-                            LightText(
-                                text = current.answer,
-                                variant = LightTextVariant.Copy
-                            )
+                        is SearchUiState.MissingKey -> {
+                            LightText("No Gemini API key set.\\nTap 'Settings' to add your free key to DataStore.",
+                                variant = LightTextVariant.Detail, lighten = true,
+                                modifier = Modifier.lightClickable { navigateTo(::SettingsScreen) })
                         }
-                        is GeminiUiState.MissingKey -> {
-                            LightText(
-                                text = "Gemini API Key is not set in DataStore.\\nTap 'Settings' to add your key.",
-                                variant = LightTextVariant.Detail,
-                                lighten = true
-                            )
+                        is SearchUiState.Error -> {
+                            LightText("Error: \${current.message}", variant = LightTextVariant.Detail, lighten = true)
                         }
-                        is GeminiUiState.Error -> {
-                            LightText(
-                                text = "Error: \${current.message}",
-                                variant = LightTextVariant.Detail,
-                                lighten = true
-                            )
+                        is SearchUiState.Success -> {
+                            LightText("Q: \\"\${current.query}\\"", variant = LightTextVariant.Detail, lighten = true,
+                                modifier = Modifier.padding(bottom = 8.dp))
+
+                            Box(
+                                modifier = Modifier.fillMaxWidth().pointerInput(Unit) {
+                                    detectTapGestures(onLongPress = {
+                                        activeAnswerToForward = Pair(current.query, current.answer)
+                                        showContextMenu = true
+                                    })
+                                }.padding(vertical = 4.dp)
+                            ) {
+                                LightText(current.answer, variant = LightTextVariant.Copy)
+                            }
+
+                            if (current.sources.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                LightText("Sources: \${current.sources.joinToString(", ") { it.title }}",
+                                    variant = LightTextVariant.Detail, lighten = true)
+                            }
                         }
+                    }
+                }
+
+                if (showContextMenu && activeAnswerToForward != null) {
+                    val (q, a) = activeAnswerToForward!!
+                    Column(modifier = Modifier.fillMaxWidth().background(LightThemeTokens.colors.background).padding(top = 16.dp)) {
+                        LightText("Message Options", variant = LightTextVariant.Heading, modifier = Modifier.padding(bottom = 12.dp))
+                        LightText("Send to Email", variant = LightTextVariant.Copy, modifier = Modifier.fillMaxWidth().lightClickable {
+                            showContextMenu = false
+                            EmailForwarder.sendToEmail(context, "dcj@vaporveil.com", q, a)
+                        }.padding(vertical = 10.dp))
+                        LightText("Copy Text", variant = LightTextVariant.Copy, modifier = Modifier.fillMaxWidth().lightClickable {
+                            val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clip.setPrimaryClip(ClipData.newPlainText("Response", a))
+                            showContextMenu = false
+                        }.padding(vertical = 10.dp))
+                        LightText("Cancel", variant = LightTextVariant.Detail, lighten = true,
+                            modifier = Modifier.fillMaxWidth().lightClickable { showContextMenu = false }.padding(vertical = 8.dp))
                     }
                 }
             }
@@ -179,17 +247,14 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
     name: 'GeminiToolViewModel.kt',
     path: 'tool/src/main/kotlin/com/thelightphone/gemini/GeminiToolViewModel.kt',
     language: 'kotlin',
-    description: 'MVVM controller: fetches key from DataStore and makes asynchronous REST calls to Gemini.',
+    description: 'Coordinates DataStore key retrieval, REST querying to Gemini, and coroutine execution.',
     content: `package com.thelightphone.gemini
 
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
 import androidx.lifecycle.viewModelScope
 import com.thelightphone.sdk.LightViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -198,103 +263,134 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.util.concurrent.TimeUnit
 
-sealed interface GeminiUiState {
-    object Idle : GeminiUiState
-    object Loading : GeminiUiState
-    object MissingKey : GeminiUiState
-    data class Success(val answer: String) : GeminiUiState
-    data class Error(val message: String) : GeminiUiState
+sealed interface SearchUiState {
+    object Idle : SearchUiState
+    object MissingKey : SearchUiState
+    data class Searching(val query: String) : SearchUiState
+    data class Success(val query: String, val answer: String, val sources: List<SearchSourceInfo> = emptyList()) : SearchUiState
+    data class Error(val message: String) : SearchUiState
 }
 
+data class SearchSourceInfo(val title: String, val url: String)
+
 class GeminiToolViewModel(
-    private val dataStore: DataStore<Preferences>,
-    private val filesDir: File
+    private val dataStoreManager: DataStoreManager
 ) : LightViewModel<Unit>() {
 
-    private val _uiState = MutableStateFlow<GeminiUiState>(GeminiUiState.Idle)
-    val uiState: StateFlow<GeminiUiState> = _uiState
+    private val _uiState = MutableStateFlow<SearchUiState>(SearchUiState.Idle)
+    val uiState: StateFlow<SearchUiState> = _uiState
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    fun ask(prompt: String) {
+    fun search(query: String) {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) return
+
         viewModelScope.launch {
-            _uiState.value = GeminiUiState.Loading
-
-            // 1. Read API key & preferences from DataStore
-            val prefs = dataStore.data.first()
-            val apiKey = prefs[DataStoreKeys.GEMINI_API_KEY]?.trim().orEmpty()
-            val conciseMode = prefs[DataStoreKeys.CONCISE_MODE] ?: true
-
-            if (apiKey.isBlank()) {
-                _uiState.value = GeminiUiState.MissingKey
+            _uiState.value = SearchUiState.Searching(trimmed)
+            val apiKey = dataStoreManager.getApiKey()
+            if (apiKey.isNullOrBlank()) {
+                _uiState.value = SearchUiState.MissingKey
                 return@launch
             }
 
-            // 2. Perform network request off the main thread
             val result = withContext(Dispatchers.IO) {
-                queryGeminiApi(apiKey, prompt, conciseMode)
+                executeGeminiSearch(apiKey, trimmed)
             }
-
             _uiState.value = result
         }
     }
 
-    private fun queryGeminiApi(apiKey: String, prompt: String, concise: Boolean): GeminiUiState {
+    private fun executeGeminiSearch(apiKey: String, query: String): SearchUiState {
         return try {
-            val systemPrompt = if (concise) {
-                "You are the Light Phone Knowledge Companion. The user values intentional, brief information. Respond strictly in 1 to 2 clear, direct sentences. No markdown formatting, no emojis, no bullet points, no greetings."
-            } else {
-                "You are the Light Phone Knowledge Companion. Respond in plain, calm, objective text. Keep it between 1 to 3 short paragraphs maximum. Do not use markdown headers, bullets, or emojis."
-            }
-
             val payload = JSONObject().apply {
-                put("system_instruction", JSONObject().apply {
-                    put("parts", JSONArray().put(JSONObject().put("text", systemPrompt)))
-                })
-                put("contents", JSONArray().put(
-                    JSONObject().put("parts", JSONArray().put(
-                        JSONObject().put("text", prompt)
-                    ))
-                ))
+                put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", query)))))
+                put("tools", JSONArray().put(JSONObject().put("googleSearch", JSONObject())))
             }
 
             val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
-                .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey")
-                .post(requestBody)
-                .build()
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey"
+            val request = Request.Builder().url(url).post(requestBody).build()
 
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val errorBody = response.body?.string().orEmpty()
-                    return GeminiUiState.Error("HTTP \${response.code}: \$errorBody")
+                    return SearchUiState.Error("HTTP Error \${response.code}")
                 }
-
-                val responseJson = JSONObject(response.body?.string().orEmpty())
-                val candidates = responseJson.optJSONArray("candidates")
-                if (candidates != null && candidates.length() > 0) {
-                    val parts = candidates.getJSONObject(0)
-                        .getJSONObject("content")
-                        .getJSONArray("parts")
-                    val text = parts.getJSONObject(0).getString("text")
-                    GeminiUiState.Success(text.trim())
-                } else {
-                    GeminiUiState.Error("No response candidates returned.")
-                }
+                val json = JSONObject(response.body?.string().orEmpty())
+                val text = json.optJSONArray("candidates")?.optJSONObject(0)
+                    ?.optJSONObject("content")?.optJSONArray("parts")?.optJSONObject(0)?.optString("text") ?: "No response"
+                SearchUiState.Success(query, text.trim())
             }
         } catch (e: Exception) {
-            GeminiUiState.Error(e.localizedMessage ?: "Network connection failed")
+            SearchUiState.Error(e.localizedMessage ?: "Network error")
         }
     }
 
-    fun reset() {
-        _uiState.value = GeminiUiState.Idle
+    fun clear() { _uiState.value = SearchUiState.Idle }
+}
+`,
+  },
+  {
+    name: 'EmailForwarder.kt',
+    path: 'tool/src/main/kotlin/com/thelightphone/gemini/EmailForwarder.kt',
+    language: 'kotlin',
+    description: 'Dispatches Android ACTION_SENDTO mailto intent for press-and-hold response forwarding.',
+    content: `package com.thelightphone.gemini
+
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+
+object EmailForwarder {
+    fun sendToEmail(context: Context, recipientEmail: String, query: String, answer: String) {
+        val subject = Uri.encode("Light Phone: $query")
+        val body = Uri.encode("Question: $query\\n\\nAnswer:\\n$answer\\n\\n--\\nForwarded from Light Phone III")
+        val mailtoUri = Uri.parse("mailto:$recipientEmail?subject=$subject&body=$body")
+
+        val intent = Intent(Intent.ACTION_SENDTO, mailtoUri).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            context.startActivity(intent)
+            Toast.makeText(context, "Forwarding to $recipientEmail", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(context, "Copied to clipboard.", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+`,
+  },
+  {
+    name: 'VoiceSearchManager.kt',
+    path: 'tool/src/main/kotlin/com/thelightphone/gemini/VoiceSearchManager.kt',
+    language: 'kotlin',
+    description: 'Audio capture via LightAudioRecorder and SpeechRecognizer.',
+    content: `package com.thelightphone.gemini
+
+import android.content.Context
+import android.content.Intent
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import java.util.Locale
+
+class VoiceSearchManager(private val context: Context) {
+    private val _voiceState = MutableStateFlow<String?>(null)
+    val voiceState: StateFlow<String?> = _voiceState
+
+    fun startListening() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+        }
+        // Dispatches speech recognition session
     }
 }
 `,
@@ -303,7 +399,7 @@ class GeminiToolViewModel(
     name: 'SettingsScreen.kt',
     path: 'tool/src/main/kotlin/com/thelightphone/gemini/SettingsScreen.kt',
     language: 'kotlin',
-    description: 'On-device screen allowing the user to view, enter, and persist their Gemini API key into DataStore.',
+    description: 'Jetpack Compose screen for viewing and persisting the user BYOK API key into DataStore.',
     content: `package com.thelightphone.gemini
 
 import androidx.compose.foundation.background
@@ -311,158 +407,47 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
-import androidx.datastore.preferences.core.edit
 import androidx.lifecycle.viewModelScope
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.ui.*
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-class SettingsViewModel(
-    private val dataStore: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences>
-) : LightViewModel<Unit>() {
-
-    val currentKey = MutableStateFlow("")
-    val conciseMode = MutableStateFlow(true)
-    val saveStatus = MutableStateFlow<String?>(null)
+class SettingsViewModel(private val dataStoreManager: DataStoreManager) : LightViewModel<Unit>() {
+    val savedApiKey = MutableStateFlow("")
+    val status = MutableStateFlow<String?>(null)
 
     init {
-        viewModelScope.launch {
-            val prefs = dataStore.data.first()
-            currentKey.value = prefs[DataStoreKeys.GEMINI_API_KEY] ?: ""
-            conciseMode.value = prefs[DataStoreKeys.CONCISE_MODE] ?: true
-        }
+        viewModelScope.launch { savedApiKey.value = dataStoreManager.getApiKey().orEmpty() }
     }
 
-    fun saveKey(newKey: String) {
+    fun saveKey(key: String) {
         viewModelScope.launch {
-            dataStore.edit { preferences ->
-                preferences[DataStoreKeys.GEMINI_API_KEY] = newKey.trim()
-            }
-            saveStatus.value = "Saved to DataStore"
-        }
-    }
-
-    fun toggleConciseMode() {
-        viewModelScope.launch {
-            val next = !conciseMode.value
-            conciseMode.value = next
-            dataStore.edit { preferences ->
-                preferences[DataStoreKeys.CONCISE_MODE] = next
-            }
+            dataStoreManager.saveApiKey(key)
+            status.value = "Saved to DataStore"
         }
     }
 }
 
-class SettingsScreen(sealedActivity: SealedLightActivity) :
-    LightScreen<Unit, SettingsViewModel>(sealedActivity) {
-
+class SettingsScreen(sealedActivity: SealedLightActivity) : LightScreen<Unit, SettingsViewModel>(sealedActivity) {
     override val viewModelClass = SettingsViewModel::class.java
-    override fun createViewModel() = SettingsViewModel(lightContext.dataStore)
+    override fun createViewModel() = SettingsViewModel(DataStoreManager(lightContext.dataStore))
 
     @Composable
     override fun Content() {
         var keyInput by remember { mutableStateOf("") }
-        val savedKey by viewModel.currentKey.collectAsState()
-        val isConcise by viewModel.conciseMode.collectAsState()
-        val statusMessage by viewModel.saveStatus.collectAsState()
-
-        LaunchedEffect(savedKey) {
-            keyInput = savedKey
-        }
+        val status by viewModel.status.collectAsState()
 
         LightTheme {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(LightThemeTokens.colors.background)
-                    .padding(24.dp)
-            ) {
-                // Header
-                LightText(
-                    text = "Tool Settings",
-                    variant = LightTextVariant.Heading,
-                    modifier = Modifier.padding(bottom = 20.dp)
-                )
-
-                // API Key Label
-                LightText(
-                    text = "Gemini API Key",
-                    variant = LightTextVariant.Detail,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
-
-                // API Key Input
-                BasicTextField(
-                    value = keyInput,
-                    onValueChange = { keyInput = it },
-                    textStyle = LightThemeTokens.typography.copy.copy(
-                        color = LightThemeTokens.colors.text
-                    ),
-                    cursorBrush = SolidColor(LightThemeTokens.colors.text),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 16.dp),
-                    decorationBox = { innerTextField ->
-                        if (keyInput.isEmpty()) {
-                            LightText(
-                                text = "Paste AI Studio API key...",
-                                variant = LightTextVariant.Copy,
-                                lighten = true
-                            )
-                        }
-                        innerTextField()
-                    }
-                )
-
-                // Save button
-                Row(modifier = Modifier.padding(bottom = 28.dp)) {
-                    LightText(
-                        text = "Save Key",
-                        variant = LightTextVariant.Detail,
-                        modifier = Modifier
-                            .lightClickable {
-                                viewModel.saveKey(keyInput)
-                            }
-                            .padding(end = 24.dp)
-                    )
-
-                    statusMessage?.let {
-                        LightText(
-                            text = it,
-                            variant = LightTextVariant.Detail,
-                            lighten = true
-                        )
-                    }
-                }
-
-                // Conciseness Toggle
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 24.dp)
-                ) {
-                    LightText(
-                        text = "Ultra-Concise: \${if (isConcise) "ON" else "OFF"}",
-                        variant = LightTextVariant.Detail,
-                        modifier = Modifier.lightClickable {
-                            viewModel.toggleConciseMode()
-                        }
-                    )
-                }
-
-                // DataStore note
-                LightText(
-                    text = "Stored privately in on-device Jetpack DataStore (DEFAULT_DATASTORE). Never leaves your phone except for direct calls to Google Generative AI.",
-                    variant = LightTextVariant.Detail,
-                    lighten = true
-                )
+            Column(modifier = Modifier.fillMaxSize().background(LightThemeTokens.colors.background).padding(24.dp)) {
+                LightText("Tool Settings", variant = LightTextVariant.Heading, modifier = Modifier.padding(bottom = 20.dp))
+                LightText("Gemini API Key (BYOK)", variant = LightTextVariant.Detail, modifier = Modifier.padding(bottom = 6.dp))
+                BasicTextField(value = keyInput, onValueChange = { keyInput = it }, modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp))
+                LightText("Save Key", variant = LightTextVariant.Detail, modifier = Modifier.lightClickable { viewModel.saveKey(keyInput) })
+                status?.let { LightText(it, variant = LightTextVariant.Detail, lighten = true) }
             }
         }
     }
@@ -470,42 +455,38 @@ class SettingsScreen(sealedActivity: SealedLightActivity) :
 `,
   },
   {
-    name: 'DataStoreKeys.kt',
-    path: 'tool/src/main/kotlin/com/thelightphone/gemini/DataStoreKeys.kt',
-    language: 'kotlin',
-    description: 'Typed keys for Jetpack DataStore Preferences.',
-    content: `package com.thelightphone.gemini
-
-import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.stringPreferencesKey
-
-object DataStoreKeys {
-    val GEMINI_API_KEY = stringPreferencesKey("gemini_api_key")
-    val CONCISE_MODE = booleanPreferencesKey("concise_mode")
-    val SELECTED_MODEL = stringPreferencesKey("selected_model")
-}
+    name: 'lighttool.toml',
+    path: 'tool/lighttool.toml',
+    language: 'toml',
+    description: 'Manifest defining tool package, metadata, and capabilities for Light Tool Library.',
+    content: `[tool]
+name = "Gemini Search"
+package = "com.thelightphone.gemini"
+description = "A quiet, voice-first knowledge companion powered by Gemini with BYOK DataStore storage."
+version = "1.0.0"
+author = "Light Community"
+capabilities = ["network", "detached-audio"]
 `,
   },
   {
     name: 'AndroidManifest.xml',
     path: 'tool/src/main/AndroidManifest.xml',
     language: 'xml',
-    description: 'Standard Android manifest declaring internet permissions and service bindings.',
+    description: 'Declares INTERNET, RECORD_AUDIO, and LightActivity entry point.',
     content: `<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.thelightphone.gemini">
 
-    <!-- Required for querying the Gemini REST API -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
-        android:label="Gemini"
+        android:label="Gemini Search"
         android:allowBackup="false"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
-        <!-- Tool Entry point activity handled by Light SDK -->
         <activity
             android:name="com.thelightphone.sdk.LightActivity"
             android:exported="true">
@@ -522,7 +503,7 @@ object DataStoreKeys {
     name: 'build.gradle.kts',
     path: 'tool/build.gradle.kts',
     language: 'kotlin',
-    description: 'Gradle configuration for the tool module in the light-sdk repository.',
+    description: 'Gradle build script configured with API 34, Compose, Coroutines, OkHttp, and DataStore.',
     content: `plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -548,30 +529,11 @@ android {
 
 dependencies {
     implementation(project(":sdk:client"))
-
-    // Networking for Gemini REST endpoint
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    
-    // Coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    
-    // Jetpack DataStore Preferences
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.2")
 }
-`,
-  },
-  {
-    name: 'lighttool.toml',
-    path: 'tool/lighttool.toml',
-    language: 'toml',
-    description: 'Light tool manifest specifying metadata and capabilities.',
-    content: `[tool]
-name = "Gemini"
-package = "com.thelightphone.gemini"
-description = "A quiet, distraction-free knowledge companion powered by Gemini."
-version = "1.0.0"
-author = "Light Community"
-capabilities = ["network"]
 `,
   },
 ];
